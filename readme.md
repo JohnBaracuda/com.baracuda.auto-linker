@@ -15,12 +15,6 @@ A no-fuss Obsidian plugin that turns plain-text references to your notes, headin
 
 ## Installation
 
-### Community Plugins
-
-1. Open **Settings -> Community Plugins -> Browse** in Obsidian.
-2. Search for **Smart Autolinker**.
-3. Click **Install** and then **Enable**.
-
 ### Manual
 
 Download the latest release from GitHub and copy the unzipped folder into `<vault>/.obsidian/plugins/`, then reload Obsidian.
