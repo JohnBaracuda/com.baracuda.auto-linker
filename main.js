@@ -104,7 +104,10 @@ function relinkTextRegion(text, curKey, index, settings) {
         for (let w = Math.min(maxWords, tokens.length); w >= 1; w--) {
             let candidateTokens = tokens.slice(0, w);
             if (!candidateTokens.length) continue;
-            let phrase = candidateTokens.map(t => t.text).join("").replace(/\s+$/, "");
+            let phrase = candidateTokens.map(t => t.text).join("");
+            // The match region (from i+wsOffset up to phraseEnd)
+            let phraseStart = i + wsOffset;
+            let phraseEnd = phraseStart + phrase.length;
             let [leading, linkPhrase, trailing] = splitPhraseLinkAndSurrounding(phrase);
             if (!linkPhrase) continue;
             let norm = phraseToNorm(linkPhrase);
@@ -114,8 +117,16 @@ function relinkTextRegion(text, curKey, index, settings) {
             let linkText = index.get(norm);
             let target = linkText.slice(2, -2);
             let replacement = makeEscapedPipeLink(target, linkPhrase);
-            out += ws + leading + replacement + trailing;
-            i += wsOffset + candidateTokens.reduce((a, t) => a + t.text.length, 0);
+            // preserve trailing, and any whitespace directly after the match (do NOT drop it)
+            let afterPhrase = "";
+            // preserve whitespace or punctuation after the match that would be dropped otherwise
+            let afterIdx = phraseEnd;
+            while (afterIdx < text.length && /\s/.test(text[afterIdx])) {
+                afterPhrase += text[afterIdx];
+                afterIdx++;
+            }
+            out += ws + leading + replacement + trailing + afterPhrase;
+            i = phraseEnd + afterPhrase.length;
             matched = true;
             break;
         }
@@ -126,6 +137,7 @@ function relinkTextRegion(text, curKey, index, settings) {
     }
     return out;
 }
+
 
 function splitTableLineSafe(line) {
     let cells = [];
@@ -369,13 +381,120 @@ var f = class extends w.Plugin {
     }
 
 handleEditorChange(e) {
-    let pos = e.getCursor(), line = e.getLine(pos.line);
-    if (!line) return;
-    if (/^\s*#+\s+/.test(line)) return;
-    if (pos.ch === 0 || !/[\s.,!?:;]/.test(line.charAt(pos.ch - 1))) return;
+    let pos = e.getCursor();
+    let line = e.getLine(pos.line);
     let file = this.app.workspace.getActiveFile();
     if (!file) return;
     let curKey = phraseToNorm(file.basename.trim());
+
+    // --- NEW: When pressing Enter, process previous line as if cursor is at end ---
+    if (pos.ch === 0 && pos.line > 0) {
+        let prevLineNum = pos.line - 1;
+        let prevLine = e.getLine(prevLineNum);
+
+        if (prevLine && !/^\s*#+\s+/.test(prevLine)) {
+            // Run same logic as for current line, but on prevLine at its end
+
+            // (1) Multi-word link extension for last link (if present)
+            let fullLine = prevLine;
+            let cursorCh = prevLine.length;
+            let maxWords = 5;
+            let linkPattern = /\[\[([^\|\[\]]+)(?:\\?\|([^\[\]]+))?\]\]/g;
+            let lastLink, lastLinkIndex, linkMatch;
+            while ((linkMatch = linkPattern.exec(fullLine)) !== null) {
+                if (linkMatch.index + linkMatch[0].length <= cursorCh) {
+                    lastLink = linkMatch;
+                    lastLinkIndex = linkMatch.index;
+                } else {
+                    break;
+                }
+            }
+            if (lastLink) {
+                let base = lastLink[2] || lastLink[1];
+                let afterLinkStart = lastLinkIndex + lastLink[0].length;
+                let afterText = fullLine.slice(afterLinkStart, cursorCh);
+                let afterWords = afterText.match(/([\w\-']+)/g) || [];
+                let rightText = fullLine.slice(cursorCh);
+                let rightWords = rightText.match(/^((?:\s+[\w\-']+){0,5})/);
+                if (rightWords && rightWords[1]) {
+                    afterWords = afterWords.concat(rightWords[1].trim().split(/\s+/).filter(Boolean));
+                }
+                for (let n = Math.min(maxWords, afterWords.length); n >= 1; n--) {
+                    let phrase = (base + ' ' + afterWords.slice(0, n).join(' ')).trim();
+                    let norm = phraseToNorm(phrase);
+                    if (this.settings.preventSelfLink && norm === curKey) continue;
+                    if (!norm) continue;
+                    if (this.index.has(norm)) {
+                        let longer = false;
+                        for (let m = afterWords.length; m > n; m--) {
+                            let longerPhrase = (base + ' ' + afterWords.slice(0, m).join(' ')).trim();
+                            if (this.index.has(phraseToNorm(longerPhrase))) {
+                                longer = true;
+                                break;
+                            }
+                        }
+                        if (longer) continue;
+                        let linkText = this.index.get(norm);
+                        let target = linkText.slice(2, -2);
+                        let start = lastLinkIndex;
+                        let end = afterLinkStart, rest = fullLine.slice(afterLinkStart), count = 0, i = 0;
+                        while (count < n && i < rest.length) {
+                            while (i < rest.length && /\s/.test(rest[i])) i++;
+                            while (i < rest.length && /\S/.test(rest[i])) i++;
+                            count++;
+                        }
+                        end = afterLinkStart + i;
+                        let newLink = makeEscapedPipeLink(target, phrase);
+                        e.replaceRange(
+                            newLink,
+                            { line: prevLineNum, ch: start },
+                            { line: prevLineNum, ch: end }
+                        );
+                        return;
+                    }
+                }
+            }
+
+            // (2) Fallback: single/multi-word matching for normal text
+            let tokens = Array.from(prevLine.matchAll(/\S+\s*/g)).map(x => ({ text: x[0], start: x.index, end: x.index + x[0].length }));
+            let linkPat = /\[\[[^\]]+\]\]/g, linkRanges = [], m2;
+            while ((m2 = linkPat.exec(prevLine)) !== null) linkRanges.push([m2.index, m2.index + m2[0].length]);
+            let codePat = /`[^`]*`/g, codeRanges = [];
+            while ((m2 = codePat.exec(prevLine)) !== null) codeRanges.push([m2.index, m2.index + m2[0].length]);
+            let skipRanges = linkRanges.concat(codeRanges);
+
+            let linked = false;
+            for (let w = Math.min(6, tokens.length); w >= 1 && !linked; w--) {
+                let candidateTokens = tokens.slice(-w);
+                let phrase = candidateTokens.map(t => t.text).join("").replace(/\s+$/, "");
+                let [leading, linkPhrase, trailing] = splitPhraseLinkAndSurrounding(phrase);
+                if (!linkPhrase) continue;
+                let norm = phraseToNorm(linkPhrase);
+                if (this.settings.preventSelfLink && norm === curKey) continue;
+                if (!norm) continue;
+                if (!this.index.has(norm)) continue;
+                let linkText = this.index.get(norm);
+                let target = linkText.slice(2, -2);
+                let start = candidateTokens[0].start;
+                let end = start + phrase.length;
+                if (skipRanges.some(([l, r]) => start < r && end > l)) continue;
+                let replacement = makeEscapedPipeLink(target, linkPhrase);
+                e.replaceRange(
+                    leading + replacement + trailing,
+                    { line: prevLineNum, ch: start },
+                    { line: prevLineNum, ch: end }
+                );
+                linked = true;
+            }
+        }
+        // Do not process the empty new line after Enter
+        return;
+    }
+
+    // --- Original unchanged logic for space/punctuation/etc ---
+    if (!line) return;
+    if (/^\s*#+\s+/.test(line)) return;
+    if (pos.ch === 0 || !/[\s.,!?:;]/.test(line.charAt(pos.ch - 1))) return;
 
     let fullLine = line;
     let cursorCh = pos.ch;
@@ -416,8 +535,6 @@ handleEditorChange(e) {
                     }
                 }
                 if (longer) continue;
-
-                // Use the link target from the index, not the typed phrase!
                 let linkText = this.index.get(norm);
                 let target = linkText.slice(2, -2);
                 let start = lastLinkIndex;
@@ -430,7 +547,7 @@ handleEditorChange(e) {
                 end = afterLinkStart + i;
                 let newLink = makeEscapedPipeLink(target, phrase);
                 e.replaceRange(
-                    newLink + " ",
+                    newLink,
                     { line: pos.line, ch: start },
                     { line: pos.line, ch: end }
                 );
@@ -463,15 +580,15 @@ handleEditorChange(e) {
         let end = start + phrase.length;
         if (skipRanges.some(([l, r]) => start < r && end > l)) continue;
         let replacement = makeEscapedPipeLink(target, linkPhrase);
-        let afterChar = line.slice(start + phrase.length, start + phrase.length + 1);
         e.replaceRange(
-            leading + replacement + trailing + (/\s/.test(afterChar) ? "" : " "),
+            leading + replacement + trailing,
             { line: pos.line, ch: start },
             { line: pos.line, ch: end }
         );
         linked = true;
     }
 }
+
 
 
 
