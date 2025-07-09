@@ -1,0 +1,9 @@
+{
+  "id": "com.baracuda.auto-linker",
+  "name": "Baracuda Auto Linker",
+  "version": "1.0.0",
+  "author": "John Baracuda",
+  "description": "Automatically turns your words into wiki-links as you type, expanding matches on the fly while ignoring code, tables, and existing links.",
+  "main": "main.js",
+  "minAppVersion": "1.0.0"
+}
