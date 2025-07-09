@@ -1,4 +1,4 @@
-# Smart Autolinker
+# Baracuda Autolinker
 
 A no-fuss Obsidian plugin that turns plain-text references to your notes, headings and block IDs into wiki-links automatically.
 
