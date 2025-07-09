@@ -17,7 +17,7 @@ A no-fuss Obsidian plugin that turns plain-text references to your notes, headin
 
 ### Manual
 
-Download the latest release from GitHub and copy the unzipped folder into `<vault>/.obsidian/plugins/`, then reload Obsidian.
+Download the latest release from GitHub and copy the unzipped folder into `<vault>/.obsidian/plugins/`, then reload Obsidian and enable the plugin under  `Settings/Community Plugins/Baracuda Linker`
 
 ## Usage
 
