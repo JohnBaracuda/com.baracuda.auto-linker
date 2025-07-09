@@ -7,7 +7,7 @@ A no-fuss Obsidian plugin that turns plain-text references to your notes, headin
 - Live linking while you type (current line only)
 - Links trigger after space **or punctuation** (, . ! ? : ;)
 - Continues growing the last link if you keep typing a longer matching phrase
-- Full-file relink on save
+- Full-file relink on save or command (shortcut can be assinged in settings)
 - Vault-wide relink command
 - Plural sensitivity (e.g. "Task" <-> "Tasks")
 - Skips existing links, code, tables and fenced blocks
@@ -17,7 +17,7 @@ A no-fuss Obsidian plugin that turns plain-text references to your notes, headin
 
 ### Manual
 
-Download the latest release from GitHub and copy the unzipped folder into `<vault>/.obsidian/plugins/`, then reload Obsidian and enable the plugin under  `Settings/Community Plugins/Baracuda Linker`
+Download the latest release from GitHub and copy the unzipped folder into `<vault>/.obsidian/plugins/`, then reload Obsidian and enable the plugin under  `Settings/Community plugins/Baracuda Linker`
 
 ## Usage
 
