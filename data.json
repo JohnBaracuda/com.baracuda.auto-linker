@@ -1,5 +1,9 @@
 {
   "autolinkOnSave": false,
   "autolinkOnEdit": true,
-  "preventSelfLink": true
+  "preventSelfLink": true,
+  "linkToLocalHeadings": false,
+  "linkToExternalHeadings": false,
+  "folderPolicy": [],
+  "onlyLinkToLocalHeadings": true
 }

@@ -105,7 +105,6 @@ function relinkTextRegion(text, curKey, index, settings) {
             let candidateTokens = tokens.slice(0, w);
             if (!candidateTokens.length) continue;
             let phrase = candidateTokens.map(t => t.text).join("");
-            // The match region (from i+wsOffset up to phraseEnd)
             let phraseStart = i + wsOffset;
             let phraseEnd = phraseStart + phrase.length;
             let [leading, linkPhrase, trailing] = splitPhraseLinkAndSurrounding(phrase);
@@ -115,11 +114,22 @@ function relinkTextRegion(text, curKey, index, settings) {
             if (!norm) continue;
             if (!index.has(norm)) continue;
             let linkText = index.get(norm);
+
+            // restrict heading links
+            if (/#/.test(linkText)) {
+                if (!settings.linkToLocalHeadings && !settings.linkToExternalHeadings) continue;
+                let target = linkText.slice(2, linkText.indexOf("#"));
+                if (settings.linkToLocalHeadings && !settings.linkToExternalHeadings) {
+                    if (phraseToNorm(target) !== curKey) continue;
+                }
+                if (!settings.linkToLocalHeadings && settings.linkToExternalHeadings) {
+                    if (phraseToNorm(target) === curKey) continue;
+                }
+            }
+
             let target = linkText.slice(2, -2);
             let replacement = makeEscapedPipeLink(target, linkPhrase);
-            // preserve trailing, and any whitespace directly after the match (do NOT drop it)
             let afterPhrase = "";
-            // preserve whitespace or punctuation after the match that would be dropped otherwise
             let afterIdx = phraseEnd;
             while (afterIdx < text.length && /\s/.test(text[afterIdx])) {
                 afterPhrase += text[afterIdx];
@@ -137,7 +147,6 @@ function relinkTextRegion(text, curKey, index, settings) {
     }
     return out;
 }
-
 
 function splitTableLineSafe(line) {
     let cells = [];
@@ -248,7 +257,9 @@ var f = class extends w.Plugin {
         this.settings = {
             autolinkOnSave: false,
             autolinkOnEdit: true,
-            preventSelfLink: true
+            preventSelfLink: true,
+            linkToLocalHeadings: false,
+            linkToExternalHeadings: false
         };
     }
 
@@ -301,7 +312,6 @@ var f = class extends w.Plugin {
                 containerEl.empty();
                 containerEl.createEl("h2", { text: "Auto Linker Settings" });
 
-                // NEW: Auto-link on edit (single line)
                 new w.Setting(containerEl)
                     .setName("Auto-link on edit")
                     .setDesc("Auto-link relevant phrases in the current line as you type.")
@@ -329,6 +339,26 @@ var f = class extends w.Plugin {
                         .setValue(this.plugin.settings.preventSelfLink)
                         .onChange(async value => {
                             this.plugin.settings.preventSelfLink = value;
+                            await this.plugin.saveSettings();
+                        }));
+
+                new w.Setting(containerEl)
+                    .setName("Link to headings in current file")
+                    .setDesc("Allow auto-linking to headings in the current file.")
+                    .addToggle(toggle => toggle
+                        .setValue(this.plugin.settings.linkToLocalHeadings)
+                        .onChange(async value => {
+                            this.plugin.settings.linkToLocalHeadings = value;
+                            await this.plugin.saveSettings();
+                        }));
+
+                new w.Setting(containerEl)
+                    .setName("Link to headings in other files")
+                    .setDesc("Allow auto-linking to headings in other files.")
+                    .addToggle(toggle => toggle
+                        .setValue(this.plugin.settings.linkToExternalHeadings)
+                        .onChange(async value => {
+                            this.plugin.settings.linkToExternalHeadings = value;
                             await this.plugin.saveSettings();
                         }));
             }
@@ -380,218 +410,283 @@ var f = class extends w.Plugin {
         }
     }
 
-handleEditorChange(e) {
-    let pos = e.getCursor();
-    let line = e.getLine(pos.line);
-    let file = this.app.workspace.getActiveFile();
-    if (!file) return;
-    let curKey = phraseToNorm(file.basename.trim());
+    buildLocalHeadingIndex(file, lines) {
+        let index = new Map();
+        let title = file.basename.trim();
+        let normTitle = phraseToNorm(title);
+        let link = `[[${title}]]`;
+        index.set(normTitle, link);
+        if (normTitle.endsWith("s")) index.set(normTitle.slice(0, -1), link);
+        else index.set(normTitle + "s", link);
 
-    // --- NEW: When pressing Enter, process previous line as if cursor is at end ---
-    if (pos.ch === 0 && pos.line > 0) {
-        let prevLineNum = pos.line - 1;
-        let prevLine = e.getLine(prevLineNum);
-
-        if (prevLine && !/^\s*#+\s+/.test(prevLine)) {
-            // Run same logic as for current line, but on prevLine at its end
-
-            // (1) Multi-word link extension for last link (if present)
-            let fullLine = prevLine;
-            let cursorCh = prevLine.length;
-            let maxWords = 5;
-            let linkPattern = /\[\[([^\|\[\]]+)(?:\\?\|([^\[\]]+))?\]\]/g;
-            let lastLink, lastLinkIndex, linkMatch;
-            while ((linkMatch = linkPattern.exec(fullLine)) !== null) {
-                if (linkMatch.index + linkMatch[0].length <= cursorCh) {
-                    lastLink = linkMatch;
-                    lastLinkIndex = linkMatch.index;
-                } else {
-                    break;
-                }
+        for (let line of lines) {
+            let h = line.match(/^(#+)\s+(.*)/);
+            if (h) {
+                let hdr = h[2].trim(),
+                    normHdr = phraseToNorm(hdr),
+                    lnkHdr = `[[${title}#${hdr}]]`;
+                index.set(normHdr, lnkHdr);
+                if (normHdr.endsWith("s")) index.set(normHdr.slice(0, -1), lnkHdr);
+                else index.set(normHdr + "s", lnkHdr);
             }
-            if (lastLink) {
-                let base = lastLink[2] || lastLink[1];
-                let afterLinkStart = lastLinkIndex + lastLink[0].length;
-                let afterText = fullLine.slice(afterLinkStart, cursorCh);
-                let afterWords = afterText.match(/([\w\-']+)/g) || [];
-                let rightText = fullLine.slice(cursorCh);
-                let rightWords = rightText.match(/^((?:\s+[\w\-']+){0,5})/);
-                if (rightWords && rightWords[1]) {
-                    afterWords = afterWords.concat(rightWords[1].trim().split(/\s+/).filter(Boolean));
-                }
-                for (let n = Math.min(maxWords, afterWords.length); n >= 1; n--) {
-                    let phrase = (base + ' ' + afterWords.slice(0, n).join(' ')).trim();
-                    let norm = phraseToNorm(phrase);
-                    if (this.settings.preventSelfLink && norm === curKey) continue;
-                    if (!norm) continue;
-                    if (this.index.has(norm)) {
-                        let longer = false;
-                        for (let m = afterWords.length; m > n; m--) {
-                            let longerPhrase = (base + ' ' + afterWords.slice(0, m).join(' ')).trim();
-                            if (this.index.has(phraseToNorm(longerPhrase))) {
-                                longer = true;
-                                break;
-                            }
-                        }
-                        if (longer) continue;
-                        let linkText = this.index.get(norm);
-                        let target = linkText.slice(2, -2);
-                        let start = lastLinkIndex;
-                        let end = afterLinkStart, rest = fullLine.slice(afterLinkStart), count = 0, i = 0;
-                        while (count < n && i < rest.length) {
-                            while (i < rest.length && /\s/.test(rest[i])) i++;
-                            while (i < rest.length && /\S/.test(rest[i])) i++;
-                            count++;
-                        }
-                        end = afterLinkStart + i;
-                        let newLink = makeEscapedPipeLink(target, phrase);
-                        e.replaceRange(
-                            newLink,
-                            { line: prevLineNum, ch: start },
-                            { line: prevLineNum, ch: end }
-                        );
-                        return;
-                    }
-                }
-            }
-
-            // (2) Fallback: single/multi-word matching for normal text
-            let tokens = Array.from(prevLine.matchAll(/\S+\s*/g)).map(x => ({ text: x[0], start: x.index, end: x.index + x[0].length }));
-            let linkPat = /\[\[[^\]]+\]\]/g, linkRanges = [], m2;
-            while ((m2 = linkPat.exec(prevLine)) !== null) linkRanges.push([m2.index, m2.index + m2[0].length]);
-            let codePat = /`[^`]*`/g, codeRanges = [];
-            while ((m2 = codePat.exec(prevLine)) !== null) codeRanges.push([m2.index, m2.index + m2[0].length]);
-            let skipRanges = linkRanges.concat(codeRanges);
-
-            let linked = false;
-            for (let w = Math.min(6, tokens.length); w >= 1 && !linked; w--) {
-                let candidateTokens = tokens.slice(-w);
-                let phrase = candidateTokens.map(t => t.text).join("").replace(/\s+$/, "");
-                let [leading, linkPhrase, trailing] = splitPhraseLinkAndSurrounding(phrase);
-                if (!linkPhrase) continue;
-                let norm = phraseToNorm(linkPhrase);
-                if (this.settings.preventSelfLink && norm === curKey) continue;
-                if (!norm) continue;
-                if (!this.index.has(norm)) continue;
-                let linkText = this.index.get(norm);
-                let target = linkText.slice(2, -2);
-                let start = candidateTokens[0].start;
-                let end = start + phrase.length;
-                if (skipRanges.some(([l, r]) => start < r && end > l)) continue;
-                let replacement = makeEscapedPipeLink(target, linkPhrase);
-                e.replaceRange(
-                    leading + replacement + trailing,
-                    { line: prevLineNum, ch: start },
-                    { line: prevLineNum, ch: end }
-                );
-                linked = true;
+            let blk = /\^([\w-]+)/g, m;
+            while ((m = blk.exec(line)) !== null) {
+                let id = m[1],
+                    normId = id.toLowerCase(),
+                    lnkBlk = `[[${title}#^${id}]]`;
+                index.set("^" + normId, lnkBlk);
             }
         }
-        // Do not process the empty new line after Enter
-        return;
+        return index;
     }
 
-    // --- Original unchanged logic for space/punctuation/etc ---
-    if (!line) return;
-    if (/^\s*#+\s+/.test(line)) return;
-    if (pos.ch === 0 || !/[\s.,!?:;]/.test(line.charAt(pos.ch - 1))) return;
+    handleEditorChange(e) {
+        let pos = e.getCursor();
+        let line = e.getLine(pos.line);
+        let file = this.app.workspace.getActiveFile();
+        if (!file) return;
+        let curKey = phraseToNorm(file.basename.trim());
 
-    let fullLine = line;
-    let cursorCh = pos.ch;
+        let lines = [];
+        for (let i = 0; i < e.lineCount(); i++) lines.push(e.getLine(i));
+        let localIndex = this.buildLocalHeadingIndex(file, lines);
+        let index = this.index;
 
-    let maxWords = 5;
-    let linkPattern = /\[\[([^\|\[\]]+)(?:\\?\|([^\[\]]+))?\]\]/g;
-    let lastLink, lastLinkIndex, linkMatch;
-    while ((linkMatch = linkPattern.exec(fullLine)) !== null) {
-        if (linkMatch.index + linkMatch[0].length <= cursorCh) {
-            lastLink = linkMatch;
-            lastLinkIndex = linkMatch.index;
-        } else {
-            break;
-        }
-    }
-    if (lastLink) {
-        let base = lastLink[2] || lastLink[1];
-        let afterLinkStart = lastLinkIndex + lastLink[0].length;
-        let afterText = fullLine.slice(afterLinkStart, cursorCh);
-        let afterWords = afterText.match(/([\w\-']+)/g) || [];
-        let rightText = fullLine.slice(cursorCh);
-        let rightWords = rightText.match(/^((?:\s+[\w\-']+){0,5})/);
-        if (rightWords && rightWords[1]) {
-            afterWords = afterWords.concat(rightWords[1].trim().split(/\s+/).filter(Boolean));
-        }
-        for (let n = Math.min(maxWords, afterWords.length); n >= 1; n--) {
-            let phrase = (base + ' ' + afterWords.slice(0, n).join(' ')).trim();
-            let norm = phraseToNorm(phrase);
-            if (this.settings.preventSelfLink && norm === curKey) continue;
-            if (!norm) continue;
-            if (this.index.has(norm)) {
-                let longer = false;
-                for (let m = afterWords.length; m > n; m--) {
-                    let longerPhrase = (base + ' ' + afterWords.slice(0, m).join(' ')).trim();
-                    if (this.index.has(phraseToNorm(longerPhrase))) {
-                        longer = true;
+        // --- When pressing Enter, process previous line as if cursor is at end ---
+        if (pos.ch === 0 && pos.line > 0) {
+            let prevLineNum = pos.line - 1;
+            let prevLine = e.getLine(prevLineNum);
+
+            if (prevLine && !/^\s*#+\s+/.test(prevLine)) {
+                let fullLine = prevLine;
+                let cursorCh = prevLine.length;
+                let maxWords = 5;
+                let linkPattern = /\[\[([^\|\[\]]+)(?:\\?\|([^\[\]]+))?\]\]/g;
+                let lastLink, lastLinkIndex, linkMatch;
+                while ((linkMatch = linkPattern.exec(fullLine)) !== null) {
+                    if (linkMatch.index + linkMatch[0].length <= cursorCh) {
+                        lastLink = linkMatch;
+                        lastLinkIndex = linkMatch.index;
+                    } else {
                         break;
                     }
                 }
-                if (longer) continue;
-                let linkText = this.index.get(norm);
-                let target = linkText.slice(2, -2);
-                let start = lastLinkIndex;
-                let end = afterLinkStart, rest = fullLine.slice(afterLinkStart), count = 0, i = 0;
-                while (count < n && i < rest.length) {
-                    while (i < rest.length && /\s/.test(rest[i])) i++;
-                    while (i < rest.length && /\S/.test(rest[i])) i++;
-                    count++;
+                if (lastLink) {
+                    let base = lastLink[2] || lastLink[1];
+                    let afterLinkStart = lastLinkIndex + lastLink[0].length;
+                    let afterText = fullLine.slice(afterLinkStart, cursorCh);
+                    let afterWords = afterText.match(/([\w\-']+)/g) || [];
+                    let rightText = fullLine.slice(cursorCh);
+                    let rightWords = rightText.match(/^((?:\s+[\w\-']+){0,5})/);
+                    if (rightWords && rightWords[1]) {
+                        afterWords = afterWords.concat(rightWords[1].trim().split(/\s+/).filter(Boolean));
+                    }
+                    for (let n = Math.min(maxWords, afterWords.length); n >= 1; n--) {
+                        let phrase = (base + ' ' + afterWords.slice(0, n).join(' ')).trim();
+                        let norm = phraseToNorm(phrase);
+                        if (this.settings.preventSelfLink && norm === curKey) continue;
+                        if (!norm) continue;
+                        if (index.has(norm)) {
+                            let linkText = index.get(norm);
+                            if (/#/.test(linkText)) {
+                                let target = linkText.slice(2, linkText.indexOf("#"));
+                                if (!this.settings.linkToLocalHeadings && !this.settings.linkToExternalHeadings) continue;
+                                if (this.settings.linkToLocalHeadings && !this.settings.linkToExternalHeadings) {
+                                    if (phraseToNorm(target) !== curKey) continue;
+                                }
+                                if (!this.settings.linkToLocalHeadings && this.settings.linkToExternalHeadings) {
+                                    if (phraseToNorm(target) === curKey) continue;
+                                }
+                            }
+                            let longer = false;
+                            for (let m = afterWords.length; m > n; m--) {
+                                let longerPhrase = (base + ' ' + afterWords.slice(0, m).join(' ')).trim();
+                                if (index.has(phraseToNorm(longerPhrase))) {
+                                    longer = true;
+                                    break;
+                                }
+                            }
+                            if (longer) continue;
+                            let target = linkText.slice(2, -2);
+                            let start = lastLinkIndex;
+                            let end = afterLinkStart, rest = fullLine.slice(afterLinkStart), count = 0, i = 0;
+                            while (count < n && i < rest.length) {
+                                while (i < rest.length && /\s/.test(rest[i])) i++;
+                                while (i < rest.length && /\S/.test(rest[i])) i++;
+                                count++;
+                            }
+                            end = afterLinkStart + i;
+                            let newLink = makeEscapedPipeLink(target, phrase);
+                            e.replaceRange(
+                                newLink,
+                                { line: prevLineNum, ch: start },
+                                { line: prevLineNum, ch: end }
+                            );
+                            return;
+                        }
+                    }
                 }
-                end = afterLinkStart + i;
-                let newLink = makeEscapedPipeLink(target, phrase);
-                e.replaceRange(
-                    newLink,
-                    { line: pos.line, ch: start },
-                    { line: pos.line, ch: end }
-                );
-                return;
+
+                let tokens = Array.from(prevLine.matchAll(/\S+\s*/g)).map(x => ({ text: x[0], start: x.index, end: x.index + x[0].length }));
+                let linkPat = /\[\[[^\]]+\]\]/g, linkRanges = [], m2;
+                while ((m2 = linkPat.exec(prevLine)) !== null) linkRanges.push([m2.index, m2.index + m2[0].length]);
+                let codePat = /`[^`]*`/g, codeRanges = [];
+                while ((m2 = codePat.exec(prevLine)) !== null) codeRanges.push([m2.index, m2.index + m2[0].length]);
+                let skipRanges = linkRanges.concat(codeRanges);
+
+                let linked = false;
+                for (let w = Math.min(6, tokens.length); w >= 1 && !linked; w--) {
+                    let candidateTokens = tokens.slice(-w);
+                    let phrase = candidateTokens.map(t => t.text).join("").replace(/\s+$/, "");
+                    let [leading, linkPhrase, trailing] = splitPhraseLinkAndSurrounding(phrase);
+                    if (!linkPhrase) continue;
+                    let norm = phraseToNorm(linkPhrase);
+                    if (this.settings.preventSelfLink && norm === curKey) continue;
+                    if (!norm) continue;
+                    if (!index.has(norm)) continue;
+                    let linkText = index.get(norm);
+                    if (/#/.test(linkText)) {
+                        let target = linkText.slice(2, linkText.indexOf("#"));
+                        if (!this.settings.linkToLocalHeadings && !this.settings.linkToExternalHeadings) continue;
+                        if (this.settings.linkToLocalHeadings && !this.settings.linkToExternalHeadings) {
+                            if (phraseToNorm(target) !== curKey) continue;
+                        }
+                        if (!this.settings.linkToLocalHeadings && this.settings.linkToExternalHeadings) {
+                            if (phraseToNorm(target) === curKey) continue;
+                        }
+                    }
+                    let target = linkText.slice(2, -2);
+                    let start = candidateTokens[0].start;
+                    let end = start + phrase.length;
+                    if (skipRanges.some(([l, r]) => start < r && end > l)) continue;
+                    let replacement = makeEscapedPipeLink(target, linkPhrase);
+                    e.replaceRange(
+                        leading + replacement + trailing,
+                        { line: prevLineNum, ch: start },
+                        { line: prevLineNum, ch: end }
+                    );
+                    linked = true;
+                }
+            }
+            return;
+        }
+
+        // --- Original logic for space/punctuation/etc ---
+        if (!line) return;
+        if (/^\s*#+\s+/.test(line)) return;
+        if (pos.ch === 0 || !/[\s.,!?:;]/.test(line.charAt(pos.ch - 1))) return;
+
+        let fullLine = line;
+        let cursorCh = pos.ch;
+
+        let maxWords = 5;
+        let linkPattern = /\[\[([^\|\[\]]+)(?:\\?\|([^\[\]]+))?\]\]/g;
+        let lastLink, lastLinkIndex, linkMatch;
+        while ((linkMatch = linkPattern.exec(fullLine)) !== null) {
+            if (linkMatch.index + linkMatch[0].length <= cursorCh) {
+                lastLink = linkMatch;
+                lastLinkIndex = linkMatch.index;
+            } else {
+                break;
             }
         }
+        if (lastLink) {
+            let base = lastLink[2] || lastLink[1];
+            let afterLinkStart = lastLinkIndex + lastLink[0].length;
+            let afterText = fullLine.slice(afterLinkStart, cursorCh);
+            let afterWords = afterText.match(/([\w\-']+)/g) || [];
+            let rightText = fullLine.slice(cursorCh);
+            let rightWords = rightText.match(/^((?:\s+[\w\-']+){0,5})/);
+            if (rightWords && rightWords[1]) {
+                afterWords = afterWords.concat(rightWords[1].trim().split(/\s+/).filter(Boolean));
+            }
+            for (let n = Math.min(maxWords, afterWords.length); n >= 1; n--) {
+                let phrase = (base + ' ' + afterWords.slice(0, n).join(' ')).trim();
+                let norm = phraseToNorm(phrase);
+                if (this.settings.preventSelfLink && norm === curKey) continue;
+                if (!norm) continue;
+                if (index.has(norm)) {
+                    let linkText = index.get(norm);
+                    if (/#/.test(linkText)) {
+                        let target = linkText.slice(2, linkText.indexOf("#"));
+                        if (!this.settings.linkToLocalHeadings && !this.settings.linkToExternalHeadings) continue;
+                        if (this.settings.linkToLocalHeadings && !this.settings.linkToExternalHeadings) {
+                            if (phraseToNorm(target) !== curKey) continue;
+                        }
+                        if (!this.settings.linkToLocalHeadings && this.settings.linkToExternalHeadings) {
+                            if (phraseToNorm(target) === curKey) continue;
+                        }
+                    }
+                    let longer = false;
+                    for (let m = afterWords.length; m > n; m--) {
+                        let longerPhrase = (base + ' ' + afterWords.slice(0, m).join(' ')).trim();
+                        if (index.has(phraseToNorm(longerPhrase))) {
+                            longer = true;
+                            break;
+                        }
+                    }
+                    if (longer) continue;
+                    let target = linkText.slice(2, -2);
+                    let start = lastLinkIndex;
+                    let end = afterLinkStart, rest = fullLine.slice(afterLinkStart), count = 0, i = 0;
+                    while (count < n && i < rest.length) {
+                        while (i < rest.length && /\s/.test(rest[i])) i++;
+                        while (i < rest.length && /\S/.test(rest[i])) i++;
+                        count++;
+                    }
+                    end = afterLinkStart + i;
+                    let newLink = makeEscapedPipeLink(target, phrase);
+                    e.replaceRange(
+                        newLink,
+                        { line: pos.line, ch: start },
+                        { line: pos.line, ch: end }
+                    );
+                    return;
+                }
+            }
+        }
+
+        let tokens = Array.from(line.slice(0, pos.ch).matchAll(/\S+\s*/g)).map(x => ({ text: x[0], start: x.index, end: x.index + x[0].length }));
+        let linkPat = /\[\[[^\]]+\]\]/g, linkRanges = [], m2;
+        while ((m2 = linkPat.exec(line)) !== null) linkRanges.push([m2.index, m2.index + m2[0].length]);
+        let codePat = /`[^`]*`/g, codeRanges = [];
+        while ((m2 = codePat.exec(line)) !== null) codeRanges.push([m2.index, m2.index + m2[0].length]);
+        let skipRanges = linkRanges.concat(codeRanges);
+
+        let linked = false;
+        for (let w = Math.min(6, tokens.length); w >= 1 && !linked; w--) {
+            let candidateTokens = tokens.slice(-w);
+            let phrase = candidateTokens.map(t => t.text).join("").replace(/\s+$/, "");
+            let [leading, linkPhrase, trailing] = splitPhraseLinkAndSurrounding(phrase);
+            if (!linkPhrase) continue;
+            let norm = phraseToNorm(linkPhrase);
+            if (this.settings.preventSelfLink && norm === curKey) continue;
+            if (!norm) continue;
+            if (!index.has(norm)) continue;
+            let linkText = index.get(norm);
+            if (/#/.test(linkText)) {
+                let target = linkText.slice(2, linkText.indexOf("#"));
+                if (!this.settings.linkToLocalHeadings && !this.settings.linkToExternalHeadings) continue;
+                if (this.settings.linkToLocalHeadings && !this.settings.linkToExternalHeadings) {
+                    if (phraseToNorm(target) !== curKey) continue;
+                }
+                if (!this.settings.linkToLocalHeadings && this.settings.linkToExternalHeadings) {
+                    if (phraseToNorm(target) === curKey) continue;
+                }
+            }
+            let target = linkText.slice(2, -2);
+            let start = candidateTokens[0].start;
+            let end = start + phrase.length;
+            if (skipRanges.some(([l, r]) => start < r && end > l)) continue;
+            let replacement = makeEscapedPipeLink(target, linkPhrase);
+            e.replaceRange(
+                leading + replacement + trailing,
+                { line: pos.line, ch: start },
+                { line: pos.line, ch: end }
+            );
+            linked = true;
+        }
     }
-
-    // Fallback: normal autolink for plain text
-    let tokens = Array.from(line.slice(0, pos.ch).matchAll(/\S+\s*/g)).map(x => ({ text: x[0], start: x.index, end: x.index + x[0].length }));
-    let linkPat = /\[\[[^\]]+\]\]/g, linkRanges = [], m2;
-    while ((m2 = linkPat.exec(line)) !== null) linkRanges.push([m2.index, m2.index + m2[0].length]);
-    let codePat = /`[^`]*`/g, codeRanges = [];
-    while ((m2 = codePat.exec(line)) !== null) codeRanges.push([m2.index, m2.index + m2[0].length]);
-    let skipRanges = linkRanges.concat(codeRanges);
-
-    let linked = false;
-    for (let w = Math.min(6, tokens.length); w >= 1 && !linked; w--) {
-        let candidateTokens = tokens.slice(-w);
-        let phrase = candidateTokens.map(t => t.text).join("").replace(/\s+$/, "");
-        let [leading, linkPhrase, trailing] = splitPhraseLinkAndSurrounding(phrase);
-        if (!linkPhrase) continue;
-        let norm = phraseToNorm(linkPhrase);
-        if (this.settings.preventSelfLink && norm === curKey) continue;
-        if (!norm) continue;
-        if (!this.index.has(norm)) continue;
-        let linkText = this.index.get(norm);
-        let target = linkText.slice(2, -2);
-        let start = candidateTokens[0].start;
-        let end = start + phrase.length;
-        if (skipRanges.some(([l, r]) => start < r && end > l)) continue;
-        let replacement = makeEscapedPipeLink(target, linkPhrase);
-        e.replaceRange(
-            leading + replacement + trailing,
-            { line: pos.line, ch: start },
-            { line: pos.line, ch: end }
-        );
-        linked = true;
-    }
-}
-
-
-
-
 
     autolinkWholeFile(editor) {
         let file = this.app.workspace.getActiveFile();
@@ -609,8 +704,7 @@ handleEditorChange(e) {
             }
             if (/^( {4,}|\t)/.test(line)) continue;
             if (inCodeBlock) continue;
-            if (/^\s*#+\s+/.test(line)) continue; // Skip headers
-
+            if (/^\s*#+\s+/.test(line)) continue;
             let linkedLine = linkLine(line, curKey, this.index, this.settings);
             if (linkedLine !== line) {
                 editor.replaceRange(linkedLine, { line: lineNum, ch: 0 }, { line: lineNum, ch: line.length });
