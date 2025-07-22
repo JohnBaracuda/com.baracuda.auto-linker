@@ -4,6 +4,11 @@
   "preventSelfLink": true,
   "linkToLocalHeadings": false,
   "linkToExternalHeadings": false,
+  "ignoredFolders": [
+    "3 - Pen and Paper",
+    "2 - Tungsten Lands0 - Resources",
+    "4 - Dreams"
+  ],
   "folderPolicy": [],
   "onlyLinkToLocalHeadings": true
 }
